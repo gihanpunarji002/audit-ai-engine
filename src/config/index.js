@@ -12,16 +12,12 @@ const config = Object.freeze({
   cors: {
     origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',').map((o) => o.trim()) : '*',
   },
-  db: {
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT || '5432', 10),
-    database: process.env.DB_NAME || 'audit_engine_dev',
-    user: process.env.DB_USER || 'postgres',
-    password: process.env.DB_PASSWORD || 'postgres',
-    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
-    max: parseInt(process.env.DB_POOL_MAX || '20', 10),
-    idleTimeoutMillis: parseInt(process.env.DB_IDLE_TIMEOUT_MILLIS || '30000', 10),
-    connectionTimeoutMillis: parseInt(process.env.DB_CONNECTION_TIMEOUT_MILLIS || '5000', 10),
+  firebase: {
+    projectId: process.env.FIREBASE_PROJECT_ID || '',
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL || '',
+    privateKey: process.env.FIREBASE_PRIVATE_KEY || '',
+    serviceAccountPath: process.env.FIREBASE_SERVICE_ACCOUNT_PATH || '',
+    storageBucket: process.env.FIREBASE_STORAGE_BUCKET || '',
   },
   jwt: {
     secret: process.env.JWT_SECRET || 'audit-ai-engine-super-secret-dev-key-change-in-production-2026',
@@ -37,6 +33,12 @@ const config = Object.freeze({
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || '',
     model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+    embeddingModel: process.env.GEMINI_EMBEDDING_MODEL || 'text-embedding-004',
+  },
+  rag: {
+    chunkSize: parseInt(process.env.RAG_CHUNK_SIZE || '1000', 10),
+    chunkOverlap: parseInt(process.env.RAG_CHUNK_OVERLAP || '200', 10),
+    topK: parseInt(process.env.RAG_TOP_K || '4', 10),
   },
 });
 

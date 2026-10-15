@@ -31,3 +31,5 @@ build/
 
 # Uploads directory
 uploads/
+
+serviceAccountKey.json

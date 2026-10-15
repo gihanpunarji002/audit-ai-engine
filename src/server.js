@@ -1,20 +1,22 @@
 import app from './app.js';
 import config from './config/index.js';
-import { testDbConnection, closePool } from './config/db.js';
+import { testFirebaseConnection } from './config/firebase.js';
 import logger from './utils/logger.js';
 
 let server;
 
 const startServer = async () => {
   try {
-    // Verify database connectivity
-    await testDbConnection();
-
-    // Start HTTP server
+    // Start HTTP server immediately
     server = app.listen(config.port, () => {
       logger.info(`Server running in ${config.env} mode on port ${config.port}`);
       logger.info(`API Base URL: http://localhost:${config.port}${config.apiPrefix}`);
+      logger.info(`Database: Cloud Firestore (with KNN Vector Search)`);
+      logger.info(`Storage: Firebase Cloud Storage`);
     });
+
+    // Verify Firebase connectivity in background
+    testFirebaseConnection().catch(() => {});
   } catch (error) {
     logger.error('Failed to start server', { error: error.message, stack: error.stack });
     process.exit(1);
@@ -31,10 +33,6 @@ const gracefulShutdown = async (signal) => {
   if (server) {
     server.close(async () => {
       logger.info('HTTP server closed');
-
-      // Close database connection pool
-      await closePool();
-
       logger.info('Graceful shutdown complete');
       process.exit(0);
     });

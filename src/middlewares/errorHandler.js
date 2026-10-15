@@ -14,21 +14,24 @@ export const errorHandler = (err, req, res, next) => {
     error = ApiError.badRequest('Invalid JSON payload');
   }
 
-  // Handle common PostgreSQL errors
+  // Handle Firebase / gRPC errors
   if (err.code) {
     switch (err.code) {
-      case '23505': // unique_violation
-        error = ApiError.conflict('A record with this identifier already exists', [
-          { detail: err.detail },
-        ]);
+      case 5: // NOT_FOUND
+      case 'not-found':
+        error = ApiError.notFound(err.message || 'Requested document was not found');
         break;
-      case '23503': // foreign_key_violation
-        error = ApiError.badRequest('Referenced record does not exist', [
-          { detail: err.detail },
-        ]);
+      case 6: // ALREADY_EXISTS
+      case 'already-exists':
+        error = ApiError.conflict('A record with this identifier already exists');
         break;
-      case '22P02': // invalid_text_representation (e.g. invalid UUID/int)
-        error = ApiError.badRequest('Invalid input syntax format');
+      case 7: // PERMISSION_DENIED
+      case 'permission-denied':
+        error = ApiError.forbidden('Access denied to this cloud resource');
+        break;
+      case 16: // UNAUTHENTICATED
+      case 'unauthenticated':
+        error = ApiError.unauthorized('Authentication credentials invalid or expired');
         break;
       default:
         break;

@@ -58,6 +58,7 @@ app.get('/', (req, res) => {
       organizations: `${config.apiPrefix}/organizations`,
       audits: `${config.apiPrefix}/audits`,
       documents: `${config.apiPrefix}/documents`,
+      rag: `${config.apiPrefix}/rag`,
       health: `${config.apiPrefix}/health`,
     },
   });

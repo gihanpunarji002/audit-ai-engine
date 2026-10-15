@@ -1,8 +1,12 @@
-import { query } from '../config/db.js';
+import { db } from '../config/firebase.js';
 
 class DocumentRepository {
+  constructor() {
+    this.collection = db.collection('documents');
+  }
+
   /**
-   * Insert a newly uploaded document record
+   * Insert a newly uploaded document record in Firestore
    * @param {Object} docData 
    */
   async create({
@@ -11,151 +15,164 @@ class DocumentRepository {
     original_name,
     stored_filename,
     file_path,
+    storage_path = null,
+    download_url = null,
     file_size,
     mime_type,
     file_type,
     metadata = {},
   }) {
-    const sql = `
-      INSERT INTO documents (
-        organization_id, uploaded_by, original_name, stored_filename,
-        file_path, file_size, mime_type, file_type, metadata
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-      RETURNING id, organization_id, uploaded_by, original_name, stored_filename,
-                file_path, file_size, mime_type, file_type, status, metadata,
-                chroma_collection_id, embedding_status, chunk_count, created_at, updated_at;
-    `;
-    const res = await query(sql, [
-      organization_id,
-      uploaded_by,
+    const docRef = this.collection.doc();
+    const now = new Date().toISOString();
+
+    const data = {
+      id: docRef.id,
+      organization_id: String(organization_id),
+      uploaded_by: String(uploaded_by),
       original_name,
       stored_filename,
       file_path,
+      storage_path,
+      download_url,
       file_size,
       mime_type,
       file_type,
-      JSON.stringify(metadata),
-    ]);
-    return res.rows[0];
+      status: 'uploaded',
+      metadata,
+      embedding_status: 'pending',
+      chunk_count: 0,
+      created_at: now,
+      updated_at: now,
+    };
+
+    await docRef.set(data);
+    return data;
   }
 
   /**
-   * Find document by ID
-   * @param {number|string} id 
+   * Find document by ID with uploader and org info
+   * @param {string|number} id 
    */
   async findById(id) {
-    const sql = `
-      SELECT d.*,
-             u.first_name AS uploader_first_name, u.last_name AS uploader_last_name, u.email AS uploader_email,
-             o.name AS organization_name, o.slug AS organization_slug
-      FROM documents d
-      LEFT JOIN users u ON u.id = d.uploaded_by
-      JOIN organizations o ON o.id = d.organization_id
-      WHERE d.id = $1;
-    `;
-    const res = await query(sql, [id]);
-    return res.rows[0] || null;
+    if (!id) return null;
+    const doc = await this.collection.doc(String(id)).get();
+    if (!doc.exists) return null;
+
+    const data = { id: doc.id, ...doc.data() };
+
+    // Attach uploader and org names
+    const [userDoc, orgDoc] = await Promise.all([
+      db.collection('users').doc(data.uploaded_by).get(),
+      db.collection('organizations').doc(data.organization_id).get(),
+    ]);
+
+    if (userDoc.exists) {
+      data.uploader_first_name = userDoc.data().first_name;
+      data.uploader_last_name = userDoc.data().last_name;
+      data.uploader_email = userDoc.data().email;
+    }
+
+    if (orgDoc.exists) {
+      data.organization_name = orgDoc.data().name;
+      data.organization_slug = orgDoc.data().slug;
+    }
+
+    return data;
   }
 
   /**
-   * Find documents in an organization with pagination and optional filters
-   * @param {number|string} orgId 
+   * Find documents in an organization with pagination and filters
+   * @param {string|number} orgId 
    * @param {Object} options 
    */
   async findByOrganization(orgId, { limit = 10, offset = 0, status, file_type } = {}) {
-    let sql = `
-      SELECT d.*,
-             u.first_name AS uploader_first_name, u.last_name AS uploader_last_name,
-             ar.overall_score, ar.authenticity_verdict, ar.risk_level, ar.id AS audit_report_id
-      FROM documents d
-      LEFT JOIN users u ON u.id = d.uploaded_by
-      LEFT JOIN audit_reports ar ON ar.document_id = d.id
-      WHERE d.organization_id = $1
-    `;
-    const params = [orgId];
+    let query = this.collection
+      .where('organization_id', '==', String(orgId))
+      .orderBy('created_at', 'desc');
 
     if (status) {
-      params.push(status);
-      sql += ` AND d.status = $${params.length}`;
+      query = query.where('status', '==', status);
     }
 
     if (file_type) {
-      params.push(file_type);
-      sql += ` AND d.file_type = $${params.length}`;
+      query = query.where('file_type', '==', file_type);
     }
 
-    sql += ` ORDER BY d.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2};`;
-    params.push(limit, offset);
+    if (offset > 0) {
+      query = query.offset(offset);
+    }
 
-    const res = await query(sql, params);
-    return res.rows;
+    query = query.limit(limit);
+
+    const snapshot = await query.get();
+    return snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
   }
 
   /**
    * Count documents for an organization
    */
   async countByOrganization(orgId, { status, file_type } = {}) {
-    let sql = `SELECT COUNT(*) AS total FROM documents WHERE organization_id = $1`;
-    const params = [orgId];
+    let query = this.collection.where('organization_id', '==', String(orgId));
 
     if (status) {
-      params.push(status);
-      sql += ` AND status = $${params.length}`;
+      query = query.where('status', '==', status);
     }
 
     if (file_type) {
-      params.push(file_type);
-      sql += ` AND file_type = $${params.length}`;
+      query = query.where('file_type', '==', file_type);
     }
 
-    const res = await query(sql, params);
-    return parseInt(res.rows[0].total, 10);
+    const countSnap = await query.count().get();
+    return countSnap.data().count || 0;
   }
 
   /**
-   * Update document processing status
-   * @param {number|string} id 
+   * Update document status
+   * @param {string|number} id 
    * @param {string} status 
    */
   async updateStatus(id, status) {
-    const sql = `
-      UPDATE documents
-      SET status = $1, updated_at = NOW()
-      WHERE id = $2
-      RETURNING id, status, updated_at;
-    `;
-    const res = await query(sql, [status, id]);
-    return res.rows[0] || null;
+    const docRef = this.collection.doc(String(id));
+    await docRef.update({
+      status,
+      updated_at: new Date().toISOString(),
+    });
+    const updated = await docRef.get();
+    return { id: updated.id, ...updated.data() };
   }
 
   /**
-   * Part 2 RAG Hook: Update embedding and Chroma collection metadata
-   * @param {number|string} id 
+   * Update embedding and chunk count
+   * @param {string|number} id 
    * @param {Object} embeddingData 
    */
-  async updateEmbeddingStatus(id, { chroma_collection_id, embedding_status, chunk_count }) {
-    const sql = `
-      UPDATE documents
-      SET chroma_collection_id = COALESCE($1, chroma_collection_id),
-          embedding_status = COALESCE($2, embedding_status),
-          chunk_count = COALESCE($3, chunk_count),
-          updated_at = NOW()
-      WHERE id = $4
-      RETURNING id, chroma_collection_id, embedding_status, chunk_count;
-    `;
-    const res = await query(sql, [chroma_collection_id, embedding_status, chunk_count, id]);
-    return res.rows[0] || null;
+  async updateEmbeddingStatus(id, { embedding_status, chunk_count, vector_collection }) {
+    const docRef = this.collection.doc(String(id));
+    const updates = {
+      embedding_status,
+      chunk_count,
+      updated_at: new Date().toISOString(),
+    };
+    if (vector_collection) {
+      updates.chroma_collection_id = vector_collection;
+    }
+
+    await docRef.update(updates);
+    const updated = await docRef.get();
+    return { id: updated.id, ...updated.data() };
   }
 
   /**
    * Delete document by ID
-   * @param {number|string} id 
+   * @param {string|number} id 
    */
   async delete(id) {
-    const sql = `DELETE FROM documents WHERE id = $1 RETURNING id, file_path;`;
-    const res = await query(sql, [id]);
-    return res.rows[0] || null;
+    const docRef = this.collection.doc(String(id));
+    const doc = await docRef.get();
+    if (!doc.exists) return null;
+    const data = { id: doc.id, ...doc.data() };
+    await docRef.delete();
+    return data;
   }
 }
 

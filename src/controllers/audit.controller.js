@@ -107,6 +107,12 @@ export class AuditController {
   downloadDocument = asyncHandler(async (req, res) => {
     const { id } = req.params;
     const document = await auditService.getDocumentById(id, req.user.id);
+
+    // If document is stored in Firebase Storage with signed URL, redirect to it
+    if (document.download_url && document.download_url.startsWith('http')) {
+      return res.redirect(document.download_url);
+    }
+
     const resolvedPath = path.resolve(document.file_path);
 
     if (!fs.existsSync(resolvedPath)) {

@@ -1,55 +1,72 @@
-import { query, getClient } from '../config/db.js';
+import { db } from '../config/firebase.js';
 import { OrganizationRole } from '../constants/roles.js';
 
 class OrganizationRepository {
+  constructor() {
+    this.orgsCollection = db.collection('organizations');
+    this.membersCollection = db.collection('organization_members');
+    this.invitesCollection = db.collection('organization_invitations');
+  }
+
   /**
-   * Create an organization and automatically attach the creator as OWNER inside a transaction.
+   * Create an organization and automatically attach creator as OWNER
    * @param {Object} orgData 
-   * @returns {Promise<Object>} Created organization
    */
   async createWithInitialOwner({ name, slug, description, owner_id }) {
-    const client = await getClient();
-    try {
-      await client.query('BEGIN');
+    const orgDocRef = this.orgsCollection.doc();
+    const now = new Date().toISOString();
 
-      const createOrgSql = `
-        INSERT INTO organizations (name, slug, description, owner_id)
-        VALUES ($1, $2, $3, $4)
-        RETURNING id, name, slug, description, owner_id, created_at, updated_at;
-      `;
-      const orgRes = await client.query(createOrgSql, [name, slug, description, owner_id]);
-      const org = orgRes.rows[0];
+    const orgData = {
+      id: orgDocRef.id,
+      name,
+      slug,
+      description: description || null,
+      owner_id: String(owner_id),
+      created_at: now,
+      updated_at: now,
+    };
 
-      const addOwnerMemberSql = `
-        INSERT INTO organization_members (organization_id, user_id, role)
-        VALUES ($1, $2, $3);
-      `;
-      await client.query(addOwnerMemberSql, [org.id, owner_id, OrganizationRole.OWNER]);
+    const memberDocRef = this.membersCollection.doc(`${orgDocRef.id}_${owner_id}`);
+    const memberData = {
+      id: memberDocRef.id,
+      organization_id: orgDocRef.id,
+      user_id: String(owner_id),
+      role: OrganizationRole.OWNER,
+      joined_at: now,
+      updated_at: now,
+    };
 
-      await client.query('COMMIT');
-      return org;
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
-    }
+    const batch = db.batch();
+    batch.set(orgDocRef, orgData);
+    batch.set(memberDocRef, memberData);
+    await batch.commit();
+
+    return orgData;
   }
 
   /**
    * Find organization by ID
-   * @param {number|string} id 
+   * @param {string|number} id 
    */
   async findById(id) {
-    const sql = `
-      SELECT o.id, o.name, o.slug, o.description, o.owner_id, o.created_at, o.updated_at,
-             u.first_name AS owner_first_name, u.last_name AS owner_last_name, u.email AS owner_email
-      FROM organizations o
-      JOIN users u ON u.id = o.owner_id
-      WHERE o.id = $1;
-    `;
-    const res = await query(sql, [id]);
-    return res.rows[0] || null;
+    if (!id) return null;
+    const doc = await this.orgsCollection.doc(String(id)).get();
+    if (!doc.exists) return null;
+
+    const orgData = { id: doc.id, ...doc.data() };
+
+    // Fetch owner details
+    if (orgData.owner_id) {
+      const ownerDoc = await db.collection('users').doc(String(orgData.owner_id)).get();
+      if (ownerDoc.exists) {
+        const owner = ownerDoc.data();
+        orgData.owner_first_name = owner.first_name;
+        orgData.owner_last_name = owner.last_name;
+        orgData.owner_email = owner.email;
+      }
+    }
+
+    return orgData;
   }
 
   /**
@@ -57,71 +74,95 @@ class OrganizationRepository {
    * @param {string} slug 
    */
   async findBySlug(slug) {
-    const sql = `
-      SELECT id, name, slug, description, owner_id, created_at, updated_at
-      FROM organizations
-      WHERE slug = $1;
-    `;
-    const res = await query(sql, [slug]);
-    return res.rows[0] || null;
+    if (!slug) return null;
+    const snapshot = await this.orgsCollection.where('slug', '==', slug).limit(1).get();
+    if (snapshot.empty) return null;
+    return { id: snapshot.docs[0].id, ...snapshot.docs[0].data() };
   }
 
   /**
    * Get all organizations a user belongs to with their role
-   * @param {number|string} userId 
+   * @param {string|number} userId 
    */
   async findUserOrganizations(userId) {
-    const sql = `
-      SELECT o.id, o.name, o.slug, o.description, o.owner_id, om.role AS member_role,
-             om.joined_at, o.created_at,
-             (SELECT COUNT(*) FROM organization_members WHERE organization_id = o.id) AS member_count,
-             (SELECT COUNT(*) FROM documents WHERE organization_id = o.id) AS document_count
-      FROM organizations o
-      JOIN organization_members om ON om.organization_id = o.id
-      WHERE om.user_id = $1
-      ORDER BY om.joined_at DESC;
-    `;
-    const res = await query(sql, [userId]);
-    return res.rows;
+    const memberSnapshot = await this.membersCollection
+      .where('user_id', '==', String(userId))
+      .get();
+
+    if (memberSnapshot.empty) return [];
+
+    const results = [];
+    for (const memberDoc of memberSnapshot.docs) {
+      const member = memberDoc.data();
+      const orgDoc = await this.orgsCollection.doc(member.organization_id).get();
+      if (orgDoc.exists) {
+        const org = orgDoc.data();
+        // Count members
+        const countSnap = await this.membersCollection
+          .where('organization_id', '==', member.organization_id)
+          .count()
+          .get();
+
+        results.push({
+          id: org.id,
+          name: org.name,
+          slug: org.slug,
+          description: org.description,
+          owner_id: org.owner_id,
+          member_role: member.role,
+          joined_at: member.joined_at,
+          created_at: org.created_at,
+          member_count: countSnap.data().count || 1,
+        });
+      }
+    }
+
+    return results;
   }
 
   /**
    * Get membership details for a specific user in an organization
-   * @param {number|string} orgId 
-   * @param {number|string} userId 
+   * @param {string|number} orgId 
+   * @param {string|number} userId 
    */
   async findMember(orgId, userId) {
-    const sql = `
-      SELECT id, organization_id, user_id, role, joined_at
-      FROM organization_members
-      WHERE organization_id = $1 AND user_id = $2;
-    `;
-    const res = await query(sql, [orgId, userId]);
-    return res.rows[0] || null;
+    if (!orgId || !userId) return null;
+    const doc = await this.membersCollection.doc(`${orgId}_${userId}`).get();
+    if (!doc.exists) return null;
+    return { id: doc.id, ...doc.data() };
   }
 
   /**
    * List all members of an organization with user profiles
-   * @param {number|string} orgId 
+   * @param {string|number} orgId 
    */
   async findMembers(orgId) {
-    const sql = `
-      SELECT om.id, om.organization_id, om.user_id, om.role, om.joined_at,
-             u.email, u.first_name, u.last_name, u.avatar_url
-      FROM organization_members om
-      JOIN users u ON u.id = om.user_id
-      WHERE om.organization_id = $1
-      ORDER BY 
-        CASE om.role
-          WHEN 'owner' THEN 1
-          WHEN 'admin' THEN 2
-          WHEN 'auditor' THEN 3
-          ELSE 4
-        END,
-        om.joined_at ASC;
-    `;
-    const res = await query(sql, [orgId]);
-    return res.rows;
+    const snapshot = await this.membersCollection
+      .where('organization_id', '==', String(orgId))
+      .get();
+
+    if (snapshot.empty) return [];
+
+    const members = [];
+    for (const doc of snapshot.docs) {
+      const data = doc.data();
+      const userDoc = await db.collection('users').doc(String(data.user_id)).get();
+      const userData = userDoc.exists ? userDoc.data() : {};
+
+      members.push({
+        id: doc.id,
+        organization_id: data.organization_id,
+        user_id: data.user_id,
+        role: data.role,
+        joined_at: data.joined_at,
+        email: userData.email || '',
+        first_name: userData.first_name || '',
+        last_name: userData.last_name || '',
+        avatar_url: userData.avatar_url || null,
+      });
+    }
+
+    return members;
   }
 
   /**
@@ -129,45 +170,53 @@ class OrganizationRepository {
    * @param {Object} memberData 
    */
   async addMember({ organization_id, user_id, role = 'member' }) {
-    const sql = `
-      INSERT INTO organization_members (organization_id, user_id, role)
-      VALUES ($1, $2, $3)
-      RETURNING id, organization_id, user_id, role, joined_at;
-    `;
-    const res = await query(sql, [organization_id, user_id, role]);
-    return res.rows[0];
+    const docRef = this.membersCollection.doc(`${organization_id}_${user_id}`);
+    const now = new Date().toISOString();
+
+    const data = {
+      id: docRef.id,
+      organization_id: String(organization_id),
+      user_id: String(user_id),
+      role,
+      joined_at: now,
+      updated_at: now,
+    };
+
+    await docRef.set(data);
+    return data;
   }
 
   /**
    * Update member role in organization
-   * @param {number|string} orgId 
-   * @param {number|string} userId 
+   * @param {string|number} orgId 
+   * @param {string|number} userId 
    * @param {string} role 
    */
   async updateMemberRole(orgId, userId, role) {
-    const sql = `
-      UPDATE organization_members
-      SET role = $1, updated_at = NOW()
-      WHERE organization_id = $2 AND user_id = $3
-      RETURNING id, organization_id, user_id, role, updated_at;
-    `;
-    const res = await query(sql, [role, orgId, userId]);
-    return res.rows[0] || null;
+    const docRef = this.membersCollection.doc(`${orgId}_${userId}`);
+    const doc = await docRef.get();
+    if (!doc.exists) return null;
+
+    const updates = {
+      role,
+      updated_at: new Date().toISOString(),
+    };
+
+    await docRef.update(updates);
+    return { id: docRef.id, ...doc.data(), ...updates };
   }
 
   /**
    * Remove member from organization
-   * @param {number|string} orgId 
-   * @param {number|string} userId 
+   * @param {string|number} orgId 
+   * @param {string|number} userId 
    */
   async removeMember(orgId, userId) {
-    const sql = `
-      DELETE FROM organization_members
-      WHERE organization_id = $1 AND user_id = $2
-      RETURNING id;
-    `;
-    const res = await query(sql, [orgId, userId]);
-    return res.rowCount > 0;
+    const docRef = this.membersCollection.doc(`${orgId}_${userId}`);
+    const doc = await docRef.get();
+    if (!doc.exists) return false;
+    await docRef.delete();
+    return true;
   }
 
   /**
@@ -175,13 +224,21 @@ class OrganizationRepository {
    * @param {Object} inviteData 
    */
   async createInvitation({ organization_id, email, role, token, expires_at, invited_by }) {
-    const sql = `
-      INSERT INTO organization_invitations (organization_id, email, role, token, expires_at, invited_by)
-      VALUES ($1, LOWER($2), $3, $4, $5, $6)
-      RETURNING id, organization_id, email, role, token, status, expires_at, invited_by, created_at;
-    `;
-    const res = await query(sql, [organization_id, email, role, token, expires_at, invited_by]);
-    return res.rows[0];
+    const docRef = this.invitesCollection.doc();
+    const data = {
+      id: docRef.id,
+      organization_id: String(organization_id),
+      email: email.trim().toLowerCase(),
+      role,
+      token,
+      status: 'pending',
+      expires_at: expires_at instanceof Date ? expires_at.toISOString() : expires_at,
+      invited_by: String(invited_by),
+      created_at: new Date().toISOString(),
+    };
+
+    await docRef.set(data);
+    return data;
   }
 
   /**
@@ -189,50 +246,62 @@ class OrganizationRepository {
    * @param {string} token 
    */
   async findInvitationByToken(token) {
-    const sql = `
-      SELECT i.id, i.organization_id, i.email, i.role, i.token, i.status, i.expires_at, i.invited_by, i.created_at,
-             o.name AS organization_name, o.slug AS organization_slug,
-             u.first_name AS inviter_first_name, u.last_name AS inviter_last_name
-      FROM organization_invitations i
-      JOIN organizations o ON o.id = i.organization_id
-      JOIN users u ON u.id = i.invited_by
-      WHERE i.token = $1;
-    `;
-    const res = await query(sql, [token]);
-    return res.rows[0] || null;
+    const snapshot = await this.invitesCollection.where('token', '==', token).limit(1).get();
+    if (snapshot.empty) return null;
+
+    const data = { id: snapshot.docs[0].id, ...snapshot.docs[0].data() };
+
+    // Fetch organization and inviter info
+    const [orgDoc, inviterDoc] = await Promise.all([
+      this.orgsCollection.doc(data.organization_id).get(),
+      db.collection('users').doc(data.invited_by).get(),
+    ]);
+
+    if (orgDoc.exists) {
+      data.organization_name = orgDoc.data().name;
+      data.organization_slug = orgDoc.data().slug;
+    }
+
+    if (inviterDoc.exists) {
+      data.inviter_first_name = inviterDoc.data().first_name;
+      data.inviter_last_name = inviterDoc.data().last_name;
+    }
+
+    return data;
   }
 
   /**
-   * Update invitation status (accepted, rejected, expired)
-   * @param {number|string} id 
+   * Update invitation status
+   * @param {string|number} id 
    * @param {string} status 
    */
   async updateInvitationStatus(id, status) {
-    const sql = `
-      UPDATE organization_invitations
-      SET status = $1
-      WHERE id = $2
-      RETURNING id, status;
-    `;
-    const res = await query(sql, [status, id]);
-    return res.rows[0] || null;
+    const docRef = this.invitesCollection.doc(String(id));
+    const doc = await docRef.get();
+    if (!doc.exists) return null;
+
+    await docRef.update({
+      status,
+      updated_at: new Date().toISOString(),
+    });
+
+    return { id, status };
   }
 
   /**
    * List pending invitations for an organization
-   * @param {number|string} orgId 
+   * @param {string|number} orgId 
    */
   async findPendingInvitations(orgId) {
-    const sql = `
-      SELECT i.id, i.organization_id, i.email, i.role, i.token, i.status, i.expires_at, i.created_at,
-             u.first_name AS inviter_first_name, u.last_name AS inviter_last_name
-      FROM organization_invitations i
-      JOIN users u ON u.id = i.invited_by
-      WHERE i.organization_id = $1 AND i.status = 'pending' AND i.expires_at > NOW()
-      ORDER BY i.created_at DESC;
-    `;
-    const res = await query(sql, [orgId]);
-    return res.rows;
+    const now = new Date().toISOString();
+    const snapshot = await this.invitesCollection
+      .where('organization_id', '==', String(orgId))
+      .where('status', '==', 'pending')
+      .get();
+
+    return snapshot.docs
+      .map((doc) => ({ id: doc.id, ...doc.data() }))
+      .filter((inv) => inv.expires_at > now);
   }
 }
 

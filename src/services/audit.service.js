@@ -4,6 +4,8 @@ import documentRepository from '../repositories/document.repository.js';
 import auditRepository from '../repositories/audit.repository.js';
 import organizationRepository from '../repositories/organization.repository.js';
 import geminiService from './gemini.service.js';
+import ragService from './rag.service.js';
+import storageService from './storage.service.js';
 import ApiError from '../utils/ApiError.js';
 import logger from '../utils/logger.js';
 import { AuditStatus, DocumentStatus } from '../constants/audit.js';
@@ -30,19 +32,30 @@ class AuditService {
       throw ApiError.forbidden('You do not have permission to upload files to this organization');
     }
 
-    // 2. Persist document record
+    // 2. Upload to Firebase Storage
+    const storageDest = `organizations/${organizationId}/documents/${file.filename}`;
+    const storageResult = await storageService.uploadFile({
+      localFilePath: file.path,
+      destination: storageDest,
+      mimeType: file.mimetype,
+    });
+
+    // 3. Persist document record in Cloud Firestore
     const document = await documentRepository.create({
       organization_id: organizationId,
       uploaded_by: userId,
       original_name: file.originalname,
       stored_filename: file.filename,
       file_path: file.path,
+      storage_path: storageResult.storagePath,
+      download_url: storageResult.downloadUrl,
       file_size: file.size,
       mime_type: file.mimetype,
       file_type: file.auditFileType || 'document',
       metadata: {
         encoding: file.encoding,
         destination: file.destination,
+        isCloudStorage: storageResult.isCloudStorage,
       },
     });
 
@@ -53,6 +66,11 @@ class AuditService {
     if (runAuditNow) {
       auditReport = await this.analyzeDocument(document.id, userId);
     }
+
+    // 4. Automatically trigger RAG vector indexing in the background
+    ragService.indexDocument(document.id, userId).catch((err) => {
+      logger.warn(`Background RAG indexing skipped/failed for Document ${document.id}: ${err.message}`);
+    });
 
     return {
       document,

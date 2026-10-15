@@ -1,47 +1,61 @@
-import { query } from '../config/db.js';
+import { db } from '../config/firebase.js';
 
 /**
- * Data Access Layer for User entity
- * Interacts directly with PostgreSQL database using parameterized queries.
+ * Data Access Layer for User entity using Cloud Firestore
  */
 class UserRepository {
+  constructor() {
+    this.collection = db.collection('users');
+  }
+
+  /**
+   * Safe user projection (strips password_hash)
+   */
+  _toSafeUser(doc) {
+    if (!doc.exists) return null;
+    const data = doc.data();
+    const { password_hash, ...safeData } = data;
+    return {
+      id: doc.id,
+      ...safeData,
+    };
+  }
+
   /**
    * Find all users with pagination and optional search
    * @param {Object} options
    */
   async findAll({ limit = 10, offset = 0, search = '' } = {}) {
-    let sql = `
-      SELECT id, email, first_name, last_name, role, is_active, avatar_url, created_at, updated_at
-      FROM users
-    `;
-    const params = [];
+    let query = this.collection.orderBy('created_at', 'desc');
 
-    if (search) {
-      sql += ` WHERE (email ILIKE $1 OR first_name ILIKE $1 OR last_name ILIKE $1)`;
-      params.push(`%${search}%`);
+    if (offset > 0) {
+      query = query.offset(offset);
     }
 
-    sql += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2};`;
-    params.push(limit, offset);
+    query = query.limit(limit);
 
-    const result = await query(sql, params);
-    return result.rows;
+    const snapshot = await query.get();
+    let users = snapshot.docs.map((doc) => this._toSafeUser(doc));
+
+    if (search) {
+      const q = search.toLowerCase();
+      users = users.filter(
+        (u) =>
+          u.email?.toLowerCase().includes(q) ||
+          u.first_name?.toLowerCase().includes(q) ||
+          u.last_name?.toLowerCase().includes(q)
+      );
+    }
+
+    return users;
   }
 
   /**
-   * Count total users with optional search
+   * Count total users
    */
   async count({ search = '' } = {}) {
-    let sql = `SELECT COUNT(*) AS total FROM users`;
-    const params = [];
-
-    if (search) {
-      sql += ` WHERE (email ILIKE $1 OR first_name ILIKE $1 OR last_name ILIKE $1)`;
-      params.push(`%${search}%`);
-    }
-
-    const result = await query(sql, params);
-    return parseInt(result.rows[0].total, 10);
+    const countSnapshot = await this.collection.count().get();
+    return countSnapshot.data().count || 0;
   }
 
   /**
@@ -49,27 +63,23 @@ class UserRepository {
    * @param {string|number} id 
    */
   async findById(id) {
-    const sql = `
-      SELECT id, email, first_name, last_name, role, is_active, avatar_url, created_at, updated_at
-      FROM users
-      WHERE id = $1;
-    `;
-    const result = await query(sql, [id]);
-    return result.rows[0] || null;
+    if (!id) return null;
+    const doc = await this.collection.doc(String(id)).get();
+    return this._toSafeUser(doc);
   }
 
   /**
-   * Find full user record by ID including password_hash (for password operations)
+   * Find full user record by ID including password_hash
    * @param {string|number} id 
    */
   async findByIdWithPassword(id) {
-    const sql = `
-      SELECT id, email, password_hash, first_name, last_name, role, is_active, avatar_url, created_at, updated_at
-      FROM users
-      WHERE id = $1;
-    `;
-    const result = await query(sql, [id]);
-    return result.rows[0] || null;
+    if (!id) return null;
+    const doc = await this.collection.doc(String(id)).get();
+    if (!doc.exists) return null;
+    return {
+      id: doc.id,
+      ...doc.data(),
+    };
   }
 
   /**
@@ -77,13 +87,14 @@ class UserRepository {
    * @param {string} email 
    */
   async findByEmail(email) {
-    const sql = `
-      SELECT id, email, first_name, last_name, role, is_active, avatar_url, created_at, updated_at
-      FROM users
-      WHERE LOWER(email) = LOWER($1);
-    `;
-    const result = await query(sql, [email]);
-    return result.rows[0] || null;
+    if (!email) return null;
+    const snapshot = await this.collection
+      .where('email', '==', email.trim().toLowerCase())
+      .limit(1)
+      .get();
+
+    if (snapshot.empty) return null;
+    return this._toSafeUser(snapshot.docs[0]);
   }
 
   /**
@@ -91,27 +102,45 @@ class UserRepository {
    * @param {string} email 
    */
   async findByEmailWithPassword(email) {
-    const sql = `
-      SELECT id, email, password_hash, first_name, last_name, role, is_active, avatar_url, created_at, updated_at
-      FROM users
-      WHERE LOWER(email) = LOWER($1);
-    `;
-    const result = await query(sql, [email]);
-    return result.rows[0] || null;
+    if (!email) return null;
+    const snapshot = await this.collection
+      .where('email', '==', email.trim().toLowerCase())
+      .limit(1)
+      .get();
+
+    if (snapshot.empty) return null;
+    const doc = snapshot.docs[0];
+    return {
+      id: doc.id,
+      ...doc.data(),
+    };
   }
 
   /**
-   * Create a new user with secure password hash
+   * Create a new user in Cloud Firestore
    * @param {Object} userData 
    */
   async create({ email, password_hash, first_name, last_name, role = 'user' }) {
-    const sql = `
-      INSERT INTO users (email, password_hash, first_name, last_name, role)
-      VALUES (LOWER($1), $2, $3, $4, $5)
-      RETURNING id, email, first_name, last_name, role, is_active, avatar_url, created_at, updated_at;
-    `;
-    const result = await query(sql, [email, password_hash, first_name, last_name, role]);
-    return result.rows[0];
+    const docRef = this.collection.doc();
+    const now = new Date().toISOString();
+
+    const userData = {
+      id: docRef.id,
+      email: email.trim().toLowerCase(),
+      password_hash,
+      first_name,
+      last_name,
+      role,
+      is_active: true,
+      avatar_url: null,
+      created_at: now,
+      updated_at: now,
+    };
+
+    await docRef.set(userData);
+
+    const { password_hash: _, ...safeUser } = userData;
+    return safeUser;
   }
 
   /**
@@ -120,19 +149,22 @@ class UserRepository {
    * @param {Object} updates 
    */
   async update(id, { first_name, last_name, avatar_url, role, is_active }) {
-    const sql = `
-      UPDATE users
-      SET first_name = COALESCE($1, first_name),
-          last_name = COALESCE($2, last_name),
-          avatar_url = COALESCE($3, avatar_url),
-          role = COALESCE($4, role),
-          is_active = COALESCE($5, is_active),
-          updated_at = NOW()
-      WHERE id = $6
-      RETURNING id, email, first_name, last_name, role, is_active, avatar_url, created_at, updated_at;
-    `;
-    const result = await query(sql, [first_name, last_name, avatar_url, role, is_active, id]);
-    return result.rows[0] || null;
+    const docRef = this.collection.doc(String(id));
+    const doc = await docRef.get();
+    if (!doc.exists) return null;
+
+    const updates = {
+      updated_at: new Date().toISOString(),
+    };
+
+    if (first_name !== undefined) updates.first_name = first_name;
+    if (last_name !== undefined) updates.last_name = last_name;
+    if (avatar_url !== undefined) updates.avatar_url = avatar_url;
+    if (role !== undefined) updates.role = role;
+    if (is_active !== undefined) updates.is_active = is_active;
+
+    await docRef.update(updates);
+    return this.findById(id);
   }
 
   /**
@@ -141,25 +173,24 @@ class UserRepository {
    * @param {string} password_hash 
    */
   async updatePassword(id, password_hash) {
-    const sql = `
-      UPDATE users
-      SET password_hash = $1,
-          updated_at = NOW()
-      WHERE id = $2
-      RETURNING id;
-    `;
-    const result = await query(sql, [password_hash, id]);
-    return result.rowCount > 0;
+    const docRef = this.collection.doc(String(id));
+    await docRef.update({
+      password_hash,
+      updated_at: new Date().toISOString(),
+    });
+    return true;
   }
 
   /**
-   * Delete a user by ID
+   * Delete user by ID
    * @param {string|number} id 
    */
   async delete(id) {
-    const sql = `DELETE FROM users WHERE id = $1 RETURNING id;`;
-    const result = await query(sql, [id]);
-    return result.rowCount > 0;
+    const docRef = this.collection.doc(String(id));
+    const doc = await docRef.get();
+    if (!doc.exists) return false;
+    await docRef.delete();
+    return true;
   }
 }
 

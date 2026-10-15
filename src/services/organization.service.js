@@ -223,7 +223,7 @@ class OrganizationService {
       throw ApiError.forbidden('Only organization owners can change member roles');
     }
 
-    if (parseInt(targetUserId, 10) === parseInt(requesterId, 10)) {
+    if (String(targetUserId) === String(requesterId)) {
       throw ApiError.badRequest('Owners cannot alter their own role directly');
     }
 
