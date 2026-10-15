@@ -7,8 +7,8 @@ export class UserController {
    * GET /api/v1/users
    */
   getUsers = asyncHandler(async (req, res) => {
-    const { page, limit } = req.query;
-    const result = await userService.getAllUsers(page, limit);
+    const { page, limit, search } = req.query;
+    const result = await userService.getAllUsers(page, limit, search);
     return res.json(ApiResponse.success(result, 'Users retrieved successfully'));
   });
 

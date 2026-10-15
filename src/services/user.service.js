@@ -1,21 +1,23 @@
+import bcrypt from 'bcryptjs';
+import config from '../config/index.js';
 import userRepository from '../repositories/user.repository.js';
 import ApiError from '../utils/ApiError.js';
 
 /**
- * Service layer containing business logic for User management
+ * Service layer containing business logic for User administrative management
  */
 class UserService {
   /**
    * Get paginated list of users
    */
-  async getAllUsers(page = 1, limit = 10) {
+  async getAllUsers(page = 1, limit = 10, search = '') {
     const parsedPage = Math.max(1, parseInt(page, 10));
     const parsedLimit = Math.max(1, Math.min(100, parseInt(limit, 10)));
     const offset = (parsedPage - 1) * parsedLimit;
 
     const [users, total] = await Promise.all([
-      userRepository.findAll({ limit: parsedLimit, offset }),
-      userRepository.count(),
+      userRepository.findAll({ limit: parsedLimit, offset, search }),
+      userRepository.count({ search }),
     ]);
 
     return {
@@ -41,13 +43,13 @@ class UserService {
   }
 
   /**
-   * Create new user
+   * Create new user (Admin-level)
    */
   async createUser(userData) {
-    const { name, email, role } = userData;
+    const { email, password, first_name, last_name, role = 'user' } = userData;
 
-    if (!name || !email) {
-      throw ApiError.badRequest('Name and email are required fields');
+    if (!email || !first_name || !last_name) {
+      throw ApiError.badRequest('Email, first name, and last name are required');
     }
 
     const existingUser = await userRepository.findByEmail(email);
@@ -55,16 +57,23 @@ class UserService {
       throw ApiError.conflict(`A user with email '${email}' already exists`);
     }
 
-    return userRepository.create({ name, email, role });
+    const defaultPassword = password || 'User@123456';
+    const password_hash = await bcrypt.hash(defaultPassword, config.bcrypt.saltRounds);
+
+    return userRepository.create({
+      email,
+      password_hash,
+      first_name,
+      last_name,
+      role,
+    });
   }
 
   /**
    * Update existing user
    */
   async updateUser(id, updateData) {
-    // Check if user exists
     await this.getUserById(id);
-
     const updatedUser = await userRepository.update(id, updateData);
     return updatedUser;
   }
@@ -73,9 +82,7 @@ class UserService {
    * Delete user by ID
    */
   async deleteUser(id) {
-    // Check if user exists
     await this.getUserById(id);
-
     return userRepository.delete(id);
   }
 }
